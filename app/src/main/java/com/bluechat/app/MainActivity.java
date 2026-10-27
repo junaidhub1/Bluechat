@@ -1,15 +1,15 @@
 package com.bluechat.app;
 
-import android.app.Activity;
-import android.os.Bundle;
-import android.os.Build;
+import android.app.*;
+import android.os.*;
 import android.Manifest;
-import android.content.pm.PackageManager;
 import android.content.*;
+import android.content.pm.PackageManager;
 import android.bluetooth.*;
-import android.graphics.Color;
-import android.view.Gravity;
-import android.view.View;
+import android.graphics.*;
+import android.net.Uri;
+import android.provider.MediaStore;
+import android.view.*;
 import android.widget.*;
 import java.io.*;
 import java.util.*;
@@ -22,15 +22,18 @@ public class MainActivity extends Activity {
     private TextView status;
     private EditText messageInput;
     private BluetoothSocket socket;
-    private OutputStream output;
+    private DataOutputStream output;
     private volatile boolean connected = false;
     private volatile boolean serverStarted = false;
+    private final Object sendLock = new Object();
 
     private final UUID APP_UUID = UUID.fromString(
         "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
     );
 
     private final Set<String> deviceAddresses = new HashSet<>();
+    private static final int PICK_IMAGE = 103;
+    private static final int MAX_IMAGE_SIZE = 5 * 1024 * 1024;
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override
@@ -71,7 +74,7 @@ public class MainActivity extends Activity {
         }
 
         if (adapter == null) {
-            status.setText("Bluetooth is not supported on this phone.");
+            status.setText("Bluetooth not supported.");
             return;
         }
 
@@ -81,7 +84,7 @@ public class MainActivity extends Activity {
     private void buildScreen() {
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(24, 28, 24, 20);
+        root.setPadding(20, 20, 20, 16);
         root.setBackgroundColor(Color.rgb(12, 20, 38));
 
         TextView title = new TextView(this);
@@ -91,59 +94,39 @@ public class MainActivity extends Activity {
         title.setGravity(Gravity.CENTER);
         root.addView(title);
 
-        TextView subtitle = new TextView(this);
-        subtitle.setText("Bluetooth Chat - No Internet");
-        subtitle.setTextColor(Color.LTGRAY);
-        subtitle.setGravity(Gravity.CENTER);
-        subtitle.setPadding(0, 8, 0, 12);
-        root.addView(subtitle);
-
         status = new TextView(this);
-        status.setText("Checking Bluetooth permissions...");
+        status.setText("Bluetooth Chat - No Internet");
         status.setTextColor(Color.WHITE);
-        status.setPadding(0, 8, 0, 12);
+        status.setPadding(0, 8, 0, 10);
         root.addView(status);
 
-        Button bluetoothButton = new Button(this);
-        bluetoothButton.setText("Turn Bluetooth ON");
-        bluetoothButton.setOnClickListener(v -> turnOnBluetooth());
-        root.addView(bluetoothButton);
-
-        Button visibleButton = new Button(this);
-        visibleButton.setText("Make This Phone Discoverable");
-        visibleButton.setOnClickListener(v -> makeDiscoverable());
-        root.addView(visibleButton);
-
-        Button scanButton = new Button(this);
-        scanButton.setText("Find Nearby Devices");
-        scanButton.setOnClickListener(v -> scanDevices());
-        root.addView(scanButton);
+        addButton("Turn Bluetooth ON", v -> turnOnBluetooth());
+        addButton("Make This Phone Discoverable", v -> makeDiscoverable());
+        addButton("Find Nearby Devices", v -> scanDevices());
 
         TextView deviceTitle = new TextView(this);
-        deviceTitle.setText("Nearby / Paired Devices (tap to connect)");
+        deviceTitle.setText("Nearby / Paired Devices");
         deviceTitle.setTextColor(Color.WHITE);
-        deviceTitle.setPadding(0, 12, 0, 6);
+        deviceTitle.setPadding(0, 8, 0, 4);
         root.addView(deviceTitle);
 
         ScrollView deviceScroll = new ScrollView(this);
         devicesBox = new LinearLayout(this);
         devicesBox.setOrientation(LinearLayout.VERTICAL);
         deviceScroll.addView(devicesBox);
-        root.addView(deviceScroll,
-            new LinearLayout.LayoutParams(-1, 0, 1));
+        root.addView(deviceScroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
         TextView chatTitle = new TextView(this);
         chatTitle.setText("Chat Messages");
         chatTitle.setTextColor(Color.WHITE);
-        chatTitle.setPadding(0, 10, 0, 5);
+        chatTitle.setPadding(0, 8, 0, 4);
         root.addView(chatTitle);
 
         ScrollView chatScroll = new ScrollView(this);
         messagesBox = new LinearLayout(this);
         messagesBox.setOrientation(LinearLayout.VERTICAL);
         chatScroll.addView(messagesBox);
-        root.addView(chatScroll,
-            new LinearLayout.LayoutParams(-1, 0, 1));
+        root.addView(chatScroll, new LinearLayout.LayoutParams(-1, 0, 2));
 
         LinearLayout sendRow = new LinearLayout(this);
         sendRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -153,8 +136,7 @@ public class MainActivity extends Activity {
         messageInput.setHint("Type a message");
         messageInput.setTextColor(Color.WHITE);
         messageInput.setHintTextColor(Color.LTGRAY);
-        sendRow.addView(messageInput,
-            new LinearLayout.LayoutParams(0, -2, 1));
+        sendRow.addView(messageInput, new LinearLayout.LayoutParams(0, -2, 1));
 
         Button sendButton = new Button(this);
         sendButton.setText("Send");
@@ -162,7 +144,17 @@ public class MainActivity extends Activity {
         sendRow.addView(sendButton);
         root.addView(sendRow);
 
+        addButton("Send Photo", v -> choosePhoto());
+        addButton("Clear Messages", v -> clearMessages());
+
         setContentView(root);
+    }
+
+    private void addButton(String label, View.OnClickListener listener) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setOnClickListener(listener);
+        root.addView(button);
     }
 
     private boolean hasPermission(String permission) {
@@ -185,6 +177,11 @@ public class MainActivity extends Activity {
                 needed.add(Manifest.permission.ACCESS_FINE_LOCATION);
         }
 
+        if (Build.VERSION.SDK_INT <= 28 && Build.VERSION.SDK_INT >= 23 &&
+            !hasPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+            needed.add(Manifest.permission.WRITE_EXTERNAL_STORAGE);
+        }
+
         if (!needed.isEmpty()) {
             requestPermissions(needed.toArray(new String[0]), 100);
         } else {
@@ -204,7 +201,7 @@ public class MainActivity extends Activity {
             }
 
             if (granted) startBluetoothFeatures();
-            else status.setText("Allow Bluetooth permissions in Settings.");
+            else status.setText("Please allow required permissions in Settings.");
         }
     }
 
@@ -224,28 +221,37 @@ public class MainActivity extends Activity {
             }
 
             if (!adapter.isEnabled()) {
-                Intent intent = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
-                startActivityForResult(intent, 101);
+                startActivityForResult(
+                    new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE), 101);
             } else {
-                status.setText("Bluetooth is ON. Make this phone discoverable.");
+                status.setText("Bluetooth ON. Make phone discoverable.");
                 startServer();
                 showPairedDevices();
             }
         } catch (SecurityException e) {
-            status.setText("Bluetooth permission is required.");
+            status.setText("Bluetooth permission required.");
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+
+        if (requestCode == 101 && resultCode == RESULT_OK) {
+            status.setText("Bluetooth ON.");
+            startServer();
+            showPairedDevices();
+        }
+
+        if (requestCode == PICK_IMAGE && resultCode == RESULT_OK &&
+            data != null && data.getData() != null) {
+            sendPhoto(data.getData());
         }
     }
 
     private void makeDiscoverable() {
-        if (Build.VERSION.SDK_INT >= 31 &&
-            !hasPermission(Manifest.permission.BLUETOOTH_ADVERTISE)) {
-            requestNeededPermissions();
-            return;
-        }
-
         try {
-            Intent intent = new Intent(
-                BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE);
+            Intent intent = new Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE);
             intent.putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300);
             startActivityForResult(intent, 102);
         } catch (Exception e) {
@@ -254,15 +260,6 @@ public class MainActivity extends Activity {
     }
 
     private void scanDevices() {
-        if (adapter == null) return;
-
-        if (Build.VERSION.SDK_INT >= 31 &&
-            (!hasPermission(Manifest.permission.BLUETOOTH_SCAN) ||
-             !hasPermission(Manifest.permission.BLUETOOTH_CONNECT))) {
-            requestNeededPermissions();
-            return;
-        }
-
         try {
             if (!adapter.isEnabled()) {
                 status.setText("Turn Bluetooth ON first.");
@@ -278,20 +275,19 @@ public class MainActivity extends Activity {
             status.setText("Searching nearby devices...");
             adapter.startDiscovery();
         } catch (SecurityException e) {
-            status.setText("Bluetooth scan permission is required.");
+            status.setText("Allow Bluetooth permissions.");
         }
     }
 
     private void showPairedDevices() {
         try {
             if (adapter == null) return;
-            if (Build.VERSION.SDK_INT >= 31 &&
-                !hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) return;
 
-            Set<BluetoothDevice> paired = adapter.getBondedDevices();
-            for (BluetoothDevice device : paired) addDevice(device);
+            for (BluetoothDevice device : adapter.getBondedDevices()) {
+                addDevice(device);
+            }
         } catch (SecurityException e) {
-            status.setText("Bluetooth permission is required.");
+            status.setText("Bluetooth permission required.");
         }
     }
 
@@ -303,10 +299,10 @@ public class MainActivity extends Activity {
             String name = device.getName();
             if (name == null || name.trim().isEmpty()) name = "Unknown device";
 
-            Button deviceButton = new Button(this);
-            deviceButton.setText(name + "\n" + address);
-            deviceButton.setOnClickListener(v -> connectTo(device));
-            devicesBox.addView(deviceButton);
+            Button button = new Button(this);
+            button.setText(name + "\n" + address);
+            button.setOnClickListener(v -> connectTo(device));
+            devicesBox.addView(button);
         } catch (SecurityException e) {
             status.setText("Allow Bluetooth permissions.");
         }
@@ -324,9 +320,7 @@ public class MainActivity extends Activity {
 
                 while (!isFinishing()) {
                     BluetoothSocket incoming = server.accept();
-                    if (incoming != null) {
-                        attachSocket(incoming);
-                    }
+                    if (incoming != null) attachSocket(incoming);
                 }
             } catch (IOException | SecurityException e) {
                 runOnUiThread(() ->
@@ -341,13 +335,8 @@ public class MainActivity extends Activity {
     }
 
     private void connectTo(BluetoothDevice device) {
-        if (Build.VERSION.SDK_INT >= 31 &&
-            !hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
-            requestNeededPermissions();
-            return;
-        }
-
         status.setText("Connecting...");
+
         new Thread(() -> {
             BluetoothSocket outgoing = null;
             try {
@@ -362,26 +351,28 @@ public class MainActivity extends Activity {
                 } catch (IOException ignored) {}
 
                 runOnUiThread(() ->
-                    status.setText("Connection failed. Make both phones discoverable and try again."));
+                    status.setText("Connection failed. Try again."));
             }
         }).start();
     }
 
     private synchronized void attachSocket(BluetoothSocket newSocket) {
         try {
-            if (socket != null) socket.close();
+            if (socket != null && socket != newSocket) socket.close();
         } catch (IOException ignored) {}
 
         socket = newSocket;
 
         try {
-            output = socket.getOutputStream();
+            output = new DataOutputStream(socket.getOutputStream());
             connected = true;
 
             runOnUiThread(() ->
-                status.setText("Connected to " + safeDeviceName(socket.getRemoteDevice())));
+                status.setText("Connected to " +
+                    safeDeviceName(socket.getRemoteDevice())));
 
-            new Thread(() -> readMessages(socket)).start();
+            BluetoothSocket activeSocket = socket;
+            new Thread(() -> readMessages(activeSocket)).start();
         } catch (IOException | SecurityException e) {
             connected = false;
             runOnUiThread(() -> status.setText("Could not open chat connection."));
@@ -407,25 +398,100 @@ public class MainActivity extends Activity {
         }
 
         try {
-            output.write((message + "\n").getBytes("UTF-8"));
-            output.flush();
+            byte[] bytes = message.getBytes("UTF-8");
+            synchronized (sendLock) {
+                output.writeByte(1);
+                output.writeInt(bytes.length);
+                output.write(bytes);
+                output.flush();
+            }
+
             addMessage("Me: " + message);
             messageInput.setText("");
         } catch (IOException e) {
-            connected = false;
-            status.setText("Message failed. Reconnect and try again.");
+            status.setText("Message failed. Reconnect.");
         }
+    }
+
+    private void choosePhoto() {
+        if (!connected) {
+            status.setText("Connect to another device first.");
+            return;
+        }
+
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.setType("image/*");
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        startActivityForResult(intent, PICK_IMAGE);
+    }
+
+    private void sendPhoto(Uri uri) {
+        new Thread(() -> {
+            try {
+                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                InputStream input = getContentResolver().openInputStream(uri);
+                if (input == null) throw new IOException("Cannot open image.");
+
+                byte[] chunk = new byte[8192];
+                int count;
+                while ((count = input.read(chunk)) != -1) {
+                    buffer.write(chunk, 0, count);
+                    if (buffer.size() > MAX_IMAGE_SIZE) {
+                        input.close();
+                        runOnUiThread(() ->
+                            status.setText("Photo too large. Maximum size is 5 MB."));
+                        return;
+                    }
+                }
+                input.close();
+
+                byte[] photo = buffer.toByteArray();
+                synchronized (sendLock) {
+                    if (!connected || output == null)
+                        throw new IOException("Not connected.");
+
+                    output.writeByte(2);
+                    output.writeInt(photo.length);
+                    output.write(photo);
+                    output.flush();
+                }
+
+                runOnUiThread(() -> {
+                    addPhoto("Me: Photo", photo);
+                    status.setText("Photo sent.");
+                });
+
+            } catch (Exception e) {
+                runOnUiThread(() -> status.setText("Could not send photo."));
+            }
+        }).start();
     }
 
     private void readMessages(BluetoothSocket activeSocket) {
         try {
-            BufferedReader reader = new BufferedReader(
-                new InputStreamReader(activeSocket.getInputStream(), "UTF-8"));
+            DataInputStream input = new DataInputStream(
+                activeSocket.getInputStream());
 
-            String line;
-            while (connected && (line = reader.readLine()) != null) {
-                final String received = line;
-                runOnUiThread(() -> addMessage("Other: " + received));
+            while (connected && activeSocket.isConnected()) {
+                int type = input.readUnsignedByte();
+                int length = input.readInt();
+
+                if (length < 0 || length > MAX_IMAGE_SIZE) {
+                    throw new IOException("Invalid message size.");
+                }
+
+                byte[] data = new byte[length];
+                input.readFully(data);
+
+                if (type == 1) {
+                    String message = new String(data, "UTF-8");
+                    runOnUiThread(() -> addMessage("Other: " + message));
+                } else if (type == 2) {
+                    runOnUiThread(() -> {
+                        addPhoto("Other: Photo", data);
+                        savePhoto(data);
+                    });
+                }
             }
         } catch (IOException e) {
             runOnUiThread(() -> status.setText("Chat connection ended."));
@@ -443,23 +509,65 @@ public class MainActivity extends Activity {
         messagesBox.addView(text);
     }
 
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
+    private void addPhoto(String label, byte[] data) {
+        TextView caption = new TextView(this);
+        caption.setText(label);
+        caption.setTextColor(Color.WHITE);
+        caption.setPadding(8, 8, 8, 4);
+        messagesBox.addView(caption);
 
-        try {
-            unregisterReceiver(receiver);
-        } catch (Exception ignored) {}
+        Bitmap bitmap = BitmapFactory.decodeByteArray(data, 0, data.length);
+        if (bitmap == null) {
+            addMessage("Could not display photo.");
+            return;
+        }
 
-        try {
-            if (adapter != null && adapter.isDiscovering()) {
-                adapter.cancelDiscovery();
-            }
-        } catch (SecurityException ignored) {}
-
-        connected = false;
-        try {
-            if (socket != null) socket.close();
-        } catch (IOException ignored) {}
+        ImageView image = new ImageView(this);
+        image.setImageBitmap(bitmap);
+        image.setAdjustViewBounds(true);
+        image.setMaxHeight(500);
+        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        messagesBox.addView(image);
     }
-}
+
+    private void savePhoto(byte[] data) {
+        try {
+            String filename = "BlueChat_" + System.currentTimeMillis() + ".jpg";
+            android.content.ContentValues values =
+                new android.content.ContentValues();
+            values.put(MediaStore.Images.Media.DISPLAY_NAME, filename);
+            values.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+
+            Uri imageUri;
+
+            if (Build.VERSION.SDK_INT >= 29) {
+                values.put(MediaStore.Images.Media.RELATIVE_PATH,
+                    android.os.Environment.DIRECTORY_PICTURES + "/BlueChat");
+                imageUri = getContentResolver().insert(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+            } else {
+                if (!hasPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+                    status.setText("Allow storage permission to save photos.");
+                    return;
+                }
+
+                File folder = new File(
+                    android.os.Environment.getExternalStoragePublicDirectory(
+                        android.os.Environment.DIRECTORY_PICTURES),
+                    "BlueChat");
+
+                if (!folder.exists() && !folder.mkdirs()) {
+                    status.setText("Could not create Pictures folder.");
+                    return;
+                }
+
+                File file = new File(folder, filename);
+                FileOutputStream fos = new FileOutputStream(file);
+                fos.write(data);
+                fos.close();
+
+                sendBroadcast(new Intent(
+                    Intent.ACTION_MEDIA_SCANNER_SCAN_FILE,
+                    Uri.fromFile(file)));
+                status.setText("Photo saved in Pictures/BlueChat.");
+         
