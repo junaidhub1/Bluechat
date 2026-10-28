@@ -530,6 +530,7 @@ public class MainActivity extends Activity {
         messagesBox.addView(image);
     }
 
+    
     private void savePhoto(byte[] data) {
         try {
             String filename = "BlueChat_" + System.currentTimeMillis() + ".jpg";
@@ -538,36 +539,62 @@ public class MainActivity extends Activity {
             values.put(MediaStore.Images.Media.DISPLAY_NAME, filename);
             values.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
 
-            Uri imageUri;
-
             if (Build.VERSION.SDK_INT >= 29) {
                 values.put(MediaStore.Images.Media.RELATIVE_PATH,
                     android.os.Environment.DIRECTORY_PICTURES + "/BlueChat");
-                imageUri = getContentResolver().insert(
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
-            } else {
-                if (!hasPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
-                    status.setText("Allow storage permission to save photos.");
-                    return;
-                }
 
+                Uri imageUri = getContentResolver().insert(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+
+                if (imageUri == null) throw new IOException("Save failed");
+
+                try (OutputStream out =
+                         getContentResolver().openOutputStream(imageUri)) {
+                    if (out == null) throw new IOException("Save failed");
+                    out.write(data);
+                }
+            } else {
                 File folder = new File(
                     android.os.Environment.getExternalStoragePublicDirectory(
                         android.os.Environment.DIRECTORY_PICTURES),
                     "BlueChat");
 
                 if (!folder.exists() && !folder.mkdirs()) {
-                    status.setText("Could not create Pictures folder.");
-                    return;
+                    throw new IOException("Folder failed");
                 }
 
                 File file = new File(folder, filename);
-                FileOutputStream fos = new FileOutputStream(file);
-                fos.write(data);
-                fos.close();
+                try (FileOutputStream out = new FileOutputStream(file)) {
+                    out.write(data);
+                }
 
                 sendBroadcast(new Intent(
                     Intent.ACTION_MEDIA_SCANNER_SCAN_FILE,
                     Uri.fromFile(file)));
-                status.setText("Photo saved in Pictures/BlueChat.");
-         
+            }
+
+            status.setText("Photo saved in Pictures/BlueChat.");
+        } catch (Exception e) {
+            status.setText("Could not save photo.");
+        }
+    }
+
+    private void clearMessages() {
+        messagesBox.removeAllViews();
+        status.setText("Messages cleared.");
+    }
+
+    @Override
+    protected void onDestroy() {
+        connected = false;
+        try {
+            unregisterReceiver(receiver);
+        } catch (Exception ignored) {
+        }
+        try {
+            if (socket != null) socket.close();
+        } catch (IOException ignored) {
+        }
+        super.onDestroy();
+    }
+}
